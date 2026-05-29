@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	controllerv1alpha1 "github.com/devfile/devworkspace-operator/apis/controller/v1alpha1"
 )
@@ -69,6 +70,7 @@ type DevWorkspaceRoutingReconciler struct {
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=*
 // +kubebuidler:rbac:groups=route.openshift.io,resources=routes/status,verbs=get,list,watch
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes/custom-host,verbs=create
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=*
 
 func (r *DevWorkspaceRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	reqLogger := r.Log.WithValues("Request.Namespace", req.Namespace, "Request.Name", req.Name)
@@ -184,6 +186,16 @@ func (r *DevWorkspaceRoutingReconciler) Reconcile(ctx context.Context, req ctrl.
 			routes[idx].Annotations = maputils.Append(routes[idx].Annotations, constants.DevWorkspaceRestrictedAccessAnnotation, restrictedAccess)
 		}
 	}
+	httpRoutes := routingObjects.HTTPRoutes
+	for idx := range httpRoutes {
+		err := controllerutil.SetControllerReference(instance, &httpRoutes[idx], r.Scheme)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		if setRestrictedAccess {
+			httpRoutes[idx].Annotations = maputils.Append(httpRoutes[idx].Annotations, constants.DevWorkspaceRestrictedAccessAnnotation, restrictedAccess)
+		}
+	}
 
 	servicesInSync, clusterServices, err := r.syncServices(instance, services)
 	if err != nil {
@@ -230,6 +242,23 @@ func (r *DevWorkspaceRoutingReconciler) Reconcile(ctx context.Context, req ctrl.
 			return reconcile.Result{Requeue: true}, r.reconcileStatus(instance, nil, nil, false, "Preparing ingresses")
 		}
 		clusterRoutingObj.Ingresses = clusterIngresses
+	}
+
+	// Sync HTTPRoutes if using gateway-api routing class
+	if len(httpRoutes) > 0 {
+		httpRoutesInSync, clusterHTTPRoutes, err := r.syncHTTPRoutes(instance, httpRoutes)
+		if err != nil {
+			failError := &sync.UnrecoverableSyncError{}
+			if errors.As(err, &failError) {
+				return reconcile.Result{}, r.markRoutingFailed(instance, err.Error())
+			}
+			reqLogger.Error(err, "Error syncing HTTPRoutes")
+			return reconcile.Result{Requeue: true}, r.reconcileStatus(instance, nil, nil, false, "Preparing HTTPRoutes")
+		} else if !httpRoutesInSync {
+			reqLogger.Info("HTTPRoutes not in sync")
+			return reconcile.Result{Requeue: true}, r.reconcileStatus(instance, nil, nil, false, "Preparing HTTPRoutes")
+		}
+		clusterRoutingObj.HTTPRoutes = clusterHTTPRoutes
 	}
 
 	exposedEndpoints, endpointsAreReady, err := solver.GetExposedEndpoints(instance.Spec.Endpoints, clusterRoutingObj)
@@ -347,7 +376,8 @@ func (r *DevWorkspaceRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error
 		}).
 		For(&controllerv1alpha1.DevWorkspaceRouting{}).
 		Owns(&corev1.Service{}).
-		Owns(&networkingv1.Ingress{})
+		Owns(&networkingv1.Ingress{}).
+		Owns(&gwapiv1.HTTPRoute{})
 	if infrastructure.IsOpenShift() {
 		bld.Owns(&routeV1.Route{})
 	}
