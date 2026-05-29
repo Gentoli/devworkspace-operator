@@ -17,7 +17,7 @@ name: Devtools container build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ _disabled ]
   workflow_dispatch:
 
 jobs:

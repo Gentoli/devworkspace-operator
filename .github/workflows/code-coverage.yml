@@ -3,7 +3,7 @@ name: Code Coverage Report
 on:
   push:
     branches:
-      - main
+      - _disabled
 
 jobs:
   coverage-report:
